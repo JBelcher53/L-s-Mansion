@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Luigi's Mansion 2D</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
+ 
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+ 
+  body {
+    background: #0a0a1a;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    font-family: 'Press Start 2P', monospace;
+    color: #fff;
+  }
+ 
+  h1 {
+    font-size: 18px;
+    color: #88ff88;
+    text-shadow: 0 0 20px #44ff44;
+    margin-bottom: 12px;
+    letter-spacing: 2px;
+  }
+ 
+  #gameCanvas {
+    display: block;
+    background: #1a1a2e;
+    border: 2px solid #44ff44;
+    box-shadow: 0 0 30px rgba(68,255,68,0.3);
+    cursor: crosshair;
+  }
+ 
+  #hud {
+    display: flex;
+    gap: 24px;
+    padding: 10px 0 6px;
+    font-size: 10px;
+    align-items: center;
+    width: 700px;
+  }
+ 
+  #hp-bar-wrap {
+    display: flex; align-items: center; gap: 8px;
+  }
+  #hp-bar-bg {
+    width: 120px; height: 12px;
+    background: #333; border: 1px solid #666; border-radius: 2px; overflow: hidden;
+  }
+  #hp-bar {
+    height: 100%; background: #44ff44; transition: width 0.1s, background 0.3s;
+  }
+ 
+  #score { color: #88ddff; }
+  #stateinfo { color: #888; font-size: 8px; margin-left: auto; }
+ 
+  #controls {
+    font-size: 8px;
+    color: #555;
+    margin-top: 8px;
+    text-align: center;
+    line-height: 2;
+  }
+</style>
+</head>
+<body>
+ 
+<h1>👻 Luigi's Mansion 2D</h1>
+ 
+<div id="hud">
+  <div id="hp-bar-wrap">
+    <span>HP</span>
+    <div id="hp-bar-bg"><div id="hp-bar" style="width:100%"></div></div>
+    <span id="hp-num">100</span>
+  </div>
+  <span id="score">GHOSTS: 0 / 5</span>
+  <span id="stateinfo"></span>
+</div>
+ 
+<canvas id="gameCanvas" width="700" height="500"></canvas>
+ 
+<div id="controls">
+  WASD / ARROW KEYS — move &nbsp;|&nbsp; MOUSE — aim flashlight &nbsp;|&nbsp; HOLD CLICK — vacuum stunned ghosts
+</div>
+ 
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+ 
+// ─── Walls ───────────────────────────────────────────────────────────────────
+const WALLS = [
+  {x:0,   y:0,   w:W,  h:20},
+  {x:0,   y:H-20,w:W,  h:20},
+  {x:0,   y:0,   w:20, h:H},
+  {x:W-20,y:0,   w:20, h:H},
+  // internal dividers
+  {x:180, y:0,   w:20, h:140},
+  {x:180, y:240, w:20, h:260},
+  {x:180, y:140, w:200,h:20},
+  {x:180, y:220, w:200,h:20},
+  {x:440, y:60,  w:20, h:160},
+  {x:440, y:300, w:20, h:200},
+];
+ 
+// ─── Luigi ───────────────────────────────────────────────────────────────────
+const luigi = {
+  x:100, y:250, r:14, speed:2.5, angle:0,
+  hp:100, maxHp:100, vacuumActive:false,
+  flashRange:145, flashAngle: Math.PI/4,
+  hurtTimer:0,
+};
+ 
+// ─── Input ───────────────────────────────────────────────────────────────────
+let mouse = {x:200,y:250};
+let keys  = {};
+canvas.addEventListener('mousemove', e => {
+  const r = canvas.getBoundingClientRect();
+  mouse.x = (e.clientX - r.left) * (W / r.width);
+  mouse.y = (e.clientY - r.top)  * (H / r.height);
+});
+canvas.addEventListener('mousedown', () => luigi.vacuumActive = true);
+canvas.addEventListener('mouseup',   () => luigi.vacuumActive = false);
+document.addEventListener('keydown', e => { keys[e.key] = true;  e.preventDefault(); });
+document.addEventListener('keyup',   e => { keys[e.key] = false; });
+ 
+// ─── Ghosts ──────────────────────────────────────────────────────────────────
+const GHOST_COLORS = ['#a0e8ff','#ffb0ff','#b0ffb0','#ffe0a0','#ffa0a0'];
+let caught = 0;
+ 
+const AGGRO_RADIUS    = 120;
+const DEAGGRO_DIST    = 300;
+const AGGRO_MEMORY    = 300;
+const ATTACK_RANGE    = 28;
+const ATTACK_COOLDOWN = 80;
+const ATTACK_DAMAGE   = 8;
+ 
+function makeGhost(x, y, colorIdx) {
+  return {
+    x, y, r:13,
+    state:'idle',
+    resistance: 100,
+    maxResistance: 100,
+    escapeStr: 0.55 + Math.random()*0.25,
+    speed: 0.7 + Math.random()*0.6,
+    wanderAngle: Math.random()*Math.PI*2,
+    wanderTimer: 0,
+    stunnedTimer: 0,
+    aggroTimer: 0,
+    attackTimer: 0,
+    color: GHOST_COLORS[colorIdx],
+    alive: true,
+  };
+}
+ 
+let ghosts = [
+  makeGhost(520,100,0),
+  makeGhost(340,390,1),
+  makeGhost(590,310,2),
+  makeGhost(270,110,3),
+  makeGhost(610,190,4),
+];
+ 
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+function wallCollide(x, y, r) {
+  for (const w of WALLS) {
+    const cx = Math.max(w.x, Math.min(x, w.x+w.w));
+    const cy = Math.max(w.y, Math.min(y, w.y+w.h));
+    if (Math.hypot(x-cx, y-cy) < r) return true;
+  }
+  return false;
+}
+ 
+function angleDiff(a, b) {
+  let d = a - b;
+  while (d >  Math.PI) d -= Math.PI*2;
+  while (d < -Math.PI) d += Math.PI*2;
+  return d;
+}
+ 
+function inFlashlight(gx, gy) {
+  const dx = gx - luigi.x, dy = gy - luigi.y;
+  const dist = Math.hypot(dx, dy);
+  if (dist > luigi.flashRange) return false;
+  const a = Math.atan2(dy, dx);
+  return Math.abs(angleDiff(a, luigi.angle)) < luigi.flashAngle;
+}
+ 
+// ─── Ghost FSM ───────────────────────────────────────────────────────────────
+// Behaviour mirrors Minecraft neutral mobs (e.g. zombified piglins):
+//   idle     → wanders; aggros if Luigi enters AGGRO_RADIUS
+//   provoked → chases Luigi, attacks on contact; stays angry for AGGRO_MEMORY
+//              frames after Luigi leaves range, then de-aggros if far enough
+//   stunned  → flashlight hit; vulnerable to vacuum; de-stuns if light leaves
+function updateGhost(g) {
+  if (!g.alive) return;
+  const dx = luigi.x - g.x, dy = luigi.y - g.y;
+  const dist = Math.hypot(dx, dy);
+ 
+  if (g.attackTimer > 0) g.attackTimer--;
+ 
+  switch (g.state) {
+ 
+    case 'idle': {
+      // Wander randomly
+      g.wanderTimer--;
+      if (g.wanderTimer <= 0) {
+        g.wanderAngle += (Math.random()-0.5) * 1.4;
+        g.wanderTimer = 40 + Math.random()*60;
+      }
+      const wx = Math.cos(g.wanderAngle) * g.speed * 0.4;
+      const wy = Math.sin(g.wanderAngle) * g.speed * 0.4;
+      if (!wallCollide(g.x+wx, g.y,    g.r)) g.x += wx;
+      if (!wallCollide(g.x,    g.y+wy, g.r)) g.y += wy;
+ 
+      // Flashlight stun takes priority over aggro
+      if (inFlashlight(g.x, g.y)) {
+        g.state = 'stunned'; g.stunnedTimer = 200; g.resistance = g.maxResistance;
+        break;
+      }
+      // Aggro trigger: Luigi enters radius
+      if (dist < AGGRO_RADIUS) {
+        g.state = 'provoked'; g.aggroTimer = AGGRO_MEMORY;
+      }
+      break;
+    }
+ 
+    case 'provoked': {
+      // Flashlight stun interrupts chase
+      if (inFlashlight(g.x, g.y)) {
+        g.state = 'stunned'; g.stunnedTimer = 200; g.resistance = g.maxResistance;
+        break;
+      }
+ 
+      // Chase Luigi
+      if (dist > 0) {
+        const mx = (dx/dist) * g.speed * 1.1;
+        const my = (dy/dist) * g.speed * 1.1;
+        if (!wallCollide(g.x+mx, g.y,    g.r)) g.x += mx;
+        if (!wallCollide(g.x,    g.y+my, g.r)) g.y += my;
+      }
+ 
+      // Attack on contact (with cooldown)
+      if (dist < ATTACK_RANGE && g.attackTimer <= 0) {
+        luigi.hp = Math.max(0, luigi.hp - ATTACK_DAMAGE);
+        luigi.hurtTimer = 12;
+        g.attackTimer = ATTACK_COOLDOWN;
+      }
+ 
+      // Aggro memory: stay angry while Luigi is in range, countdown when he leaves
+      if (dist < DEAGGRO_DIST) {
+        g.aggroTimer = AGGRO_MEMORY;        // keep refreshing while close
+      } else {
+        g.aggroTimer--;
+        if (g.aggroTimer <= 0) g.state = 'idle'; // forgot Luigi
+      }
+      break;
+    }
+ 
+    case 'stunned': {
+      const lit = inFlashlight(g.x, g.y);
+      if (!lit) {
+        g.stunnedTimer--;
+        g.resistance = Math.min(g.maxResistance, g.resistance + g.escapeStr*2);
+        if (g.stunnedTimer <= 0) {
+          // Return to provoked if still close enough, otherwise idle
+          g.state = dist < DEAGGRO_DIST ? 'provoked' : 'idle';
+          g.aggroTimer = AGGRO_MEMORY;
+        }
+        break;
+      }
+      if (luigi.vacuumActive && dist < 130) {
+        g.resistance -= 1.3;
+        g.resistance += g.escapeStr;
+        const pull = 2.5 * (1 - dist/130);
+        const px = -(dx/dist) * pull;
+        const py = -(dy/dist) * pull;
+        if (!wallCollide(g.x+px, g.y,    g.r)) g.x += px; else g.x += px*0.1;
+        if (!wallCollide(g.x,    g.y+py, g.r)) g.y += py; else g.y += py*0.1;
+        if (g.resistance <= 0) {
+          g.state = 'caught'; g.alive = false; caught++;
+        }
+      } else {
+        g.resistance = Math.min(g.maxResistance, g.resistance + g.escapeStr*0.8);
+      }
+      break;
+    }
+  }
+ 
+  g.x = Math.max(g.r+22, Math.min(W-g.r-22, g.x));
+  g.y = Math.max(g.r+22, Math.min(H-g.r-22, g.y));
+}
+ 
+// ─── Draw ─────────────────────────────────────────────────────────────────────
+function drawWalls() {
+  ctx.fillStyle = '#232344';
+  for (const w of WALLS) ctx.fillRect(w.x, w.y, w.w, w.h);
+  ctx.strokeStyle = '#3a3a70';
+  ctx.lineWidth = 1;
+  for (const w of WALLS) ctx.strokeRect(w.x, w.y, w.w, w.h);
+}
+ 
+function drawFloor() {
+  ctx.fillStyle = '#14142a';
+  ctx.fillRect(20,20,W-40,H-40);
+  // tile grid
+  ctx.strokeStyle = 'rgba(255,255,255,0.025)';
+  ctx.lineWidth = 1;
+  for (let x=20; x<W-20; x+=40) { ctx.beginPath(); ctx.moveTo(x,20); ctx.lineTo(x,H-20); ctx.stroke(); }
+  for (let y=20; y<H-20; y+=40) { ctx.beginPath(); ctx.moveTo(20,y); ctx.lineTo(W-20,y); ctx.stroke(); }
+}
+ 
+function drawFlashlight() {
+  const a0 = luigi.angle - luigi.flashAngle;
+  const a1 = luigi.angle + luigi.flashAngle;
+  const grad = ctx.createRadialGradient(luigi.x,luigi.y,0, luigi.x,luigi.y,luigi.flashRange);
+  grad.addColorStop(0, 'rgba(255,255,180,0.22)');
+  grad.addColorStop(0.6,'rgba(255,255,150,0.08)');
+  grad.addColorStop(1, 'rgba(255,255,100,0)');
+  ctx.beginPath();
+  ctx.moveTo(luigi.x, luigi.y);
+  ctx.arc(luigi.x, luigi.y, luigi.flashRange, a0, a1);
+  ctx.closePath();
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,120,0.25)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+}
+ 
+function drawLuigi() {
+  if (luigi.hurtTimer > 0) luigi.hurtTimer--;
+ 
+  ctx.save();
+  ctx.translate(luigi.x, luigi.y);
+ 
+  // Hurt flash: tint red
+  if (luigi.hurtTimer > 0 && Math.floor(luigi.hurtTimer/2) % 2 === 0) {
+    ctx.globalAlpha = 0.45;
+    ctx.fillStyle = '#ff2222';
+    ctx.beginPath();
+    ctx.arc(0, 0, luigi.r+4, 0, Math.PI*2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+ 
+  ctx.rotate(luigi.angle);
+ 
+  // Body
+  ctx.fillStyle = luigi.vacuumActive ? '#ffaa33' : '#33aa33';
+  ctx.beginPath();
+  ctx.arc(0, 0, luigi.r, 0, Math.PI*2);
+  ctx.fill();
+ 
+  // Hat brim
+  ctx.fillStyle = luigi.vacuumActive ? '#cc7700' : '#226622';
+  ctx.fillRect(-luigi.r, -4, luigi.r*2, 5);
+ 
+  // Eye
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(luigi.r*0.45, -2, 4, 0, Math.PI*2);
+  ctx.fill();
+  ctx.fillStyle = '#222';
+  ctx.beginPath();
+  ctx.arc(luigi.r*0.45+1, -2, 2, 0, Math.PI*2);
+  ctx.fill();
+ 
+  // Vacuum beam
+  if (luigi.vacuumActive) {
+    const t = Date.now() / 60;
+    for (let i=0; i<4; i++) {
+      const off = (t + i*0.9) % 4;
+      ctx.strokeStyle = `rgba(100,200,255,${0.7 - off*0.15})`;
+      ctx.lineWidth = 3 - off*0.5;
+      ctx.beginPath();
+      ctx.arc(luigi.r + 8 + off*12, 0, 5 + off*3, 0, Math.PI*2);
+      ctx.stroke();
+    }
+  }
+ 
+  ctx.restore();
+ 
+  // ── On-canvas health bar above Luigi ──
+  const bw = 36, bh = 5;
+  const bx = luigi.x - bw/2, by = luigi.y - luigi.r - 14;
+  const pct = Math.max(0, luigi.hp / luigi.maxHp);
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(bx-1, by-1, bw+2, bh+2);
+  ctx.fillStyle = pct > 0.5 ? '#44ff44' : pct > 0.25 ? '#ffaa00' : '#ff3333';
+  ctx.fillRect(bx, by, bw*pct, bh);
+  ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+  ctx.lineWidth = 0.5;
+  ctx.strokeRect(bx, by, bw, bh);
+}
+ 
+function drawGhost(g) {
+  if (!g.alive) return;
+  // Aggro radius indicator (idle ghosts only)
+  if (g.state === 'idle') {
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,100,100,0.15)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4,4]);
+    ctx.beginPath();
+    ctx.arc(g.x, g.y, AGGRO_RADIUS, 0, Math.PI*2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+ 
+  ctx.save();
+  const bob = Math.sin(Date.now()/380 + g.x*0.05) * 3;
+  ctx.translate(g.x, g.y + bob);
+ 
+  ctx.globalAlpha = g.state === 'stunned' ? 0.55 : 0.9;
+ 
+  const col = g.state === 'stunned' ? '#ffffff' : g.color;
+ 
+  // Ghost body
+  ctx.fillStyle = col;
+  ctx.shadowColor = col;
+  ctx.shadowBlur = g.state === 'stunned' ? 14 : 6;
+  ctx.beginPath();
+  ctx.arc(0, -4, g.r, Math.PI, 0);
+  const bottom = -4 + g.r;
+  ctx.lineTo(g.r, bottom);
+  const segs = 3;
+  const segW = (g.r*2) / segs;
+  for (let i=0; i<segs; i++) {
+    const bx = g.r - (i+0.5)*segW;
+    ctx.quadraticCurveTo(bx - segW/2, bottom - 7, bx, bottom);
+  }
+  ctx.lineTo(-g.r, bottom);
+  ctx.closePath();
+  ctx.fill();
+  ctx.shadowBlur = 0;
+ 
+  // Eyes
+  ctx.fillStyle = '#1a1a3a';
+  ctx.beginPath();
+  ctx.arc(-4, -6, 3.5, 0, Math.PI*2);
+  ctx.arc( 4, -6, 3.5, 0, Math.PI*2);
+  ctx.fill();
+  ctx.fillStyle = g.state === 'stunned' ? '#aaaaff' : '#fff';
+  ctx.beginPath();
+  ctx.arc(-3, -7, 1.5, 0, Math.PI*2);
+  ctx.arc( 5, -7, 1.5, 0, Math.PI*2);
+  ctx.fill();
+ 
+  // Resistance bar (when stunned)
+  if (g.state === 'stunned') {
+    const pct = Math.max(0, g.resistance / g.maxResistance);
+    const bw = g.r*2+4, bh = 6, bx = -g.r-2, by = -g.r-18;
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(bx, by, bw, bh);
+    ctx.fillStyle = pct > 0.5 ? '#44ff44' : pct > 0.25 ? '#ffaa00' : '#ff4444';
+    ctx.fillRect(bx, by, bw*pct, bh);
+    ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+    ctx.lineWidth = 0.5;
+    ctx.strokeRect(bx, by, bw, bh);
+  }
+ 
+  ctx.restore();
+}
+ 
+function drawOverlay(text, sub, color) {
+  ctx.fillStyle = 'rgba(0,0,0,0.72)';
+  ctx.fillRect(0,0,W,H);
+  ctx.fillStyle = color;
+  ctx.font = "bold 22px 'Press Start 2P'";
+  ctx.textAlign = 'center';
+  ctx.fillText(text, W/2, H/2 - 24);
+  ctx.fillStyle = '#888';
+  ctx.font = "12px 'Press Start 2P'";
+  ctx.fillText(sub, W/2, H/2 + 16);
+}
+ 
+// ─── Game state ───────────────────────────────────────────────────────────────
+let gameOver = false, gameWon = false;
+ 
+function update() {
+  if (gameOver || gameWon) return;
+ 
+  // Move Luigi
+  let dx=0, dy=0;
+  if (keys['ArrowUp']   || keys['w'] || keys['W']) dy=-1;
+  if (keys['ArrowDown'] || keys['s'] || keys['S']) dy= 1;
+  if (keys['ArrowLeft'] || keys['a'] || keys['A']) dx=-1;
+  if (keys['ArrowRight']|| keys['d'] || keys['D']) dx= 1;
+  if (dx && dy) { dx*=0.707; dy*=0.707; }
+  const nx = luigi.x + dx*luigi.speed;
+  const ny = luigi.y + dy*luigi.speed;
+  if (!wallCollide(nx, luigi.y, luigi.r)) luigi.x = nx;
+  if (!wallCollide(luigi.x, ny, luigi.r)) luigi.y = ny;
+ 
+  luigi.angle = Math.atan2(mouse.y - luigi.y, mouse.x - luigi.x);
+ 
+  ghosts.forEach(updateGhost);
+ 
+  if (luigi.hp <= 0) gameOver = true;
+  if (caught >= 5)   gameWon  = true;
+ 
+  // HUD
+  const hpPct = Math.max(0, luigi.hp / luigi.maxHp * 100);
+  document.getElementById('hp-bar').style.width = hpPct + '%';
+  document.getElementById('hp-bar').style.background = hpPct > 50 ? '#44ff44' : hpPct > 25 ? '#ffaa00' : '#ff4444';
+  document.getElementById('hp-num').textContent = Math.round(luigi.hp);
+  document.getElementById('score').textContent  = `GHOSTS: ${caught} / 5`;
+ 
+  const counts = {idle:0, provoked:0, stunned:0};
+  ghosts.filter(g=>g.alive).forEach(g => counts[g.state] = (counts[g.state]||0)+1);
+  document.getElementById('stateinfo').textContent =
+    Object.entries(counts).filter(([,v])=>v>0).map(([k,v])=>`${k}:${v}`).join('  ');
+}
+ 
+function draw() {
+  ctx.clearRect(0,0,W,H);
+  drawFloor();
+  drawWalls();
+  drawFlashlight();
+  ghosts.forEach(drawGhost);
+  drawLuigi();
+ 
+  if (gameOver) drawOverlay("GAME OVER", "Refresh to try again", "#ff6666");
+  if (gameWon)  drawOverlay("MANSION CLEARED!", "All 5 ghosts caught!", "#88ff88");
+}
+ 
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
+ 
